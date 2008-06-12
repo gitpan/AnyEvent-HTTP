@@ -6,6 +6,10 @@ AnyEvent::HTTP - simple but non-blocking HTTP/HTTPS client
 
    use AnyEvent::HTTP;
 
+   http_get "http://www.nethype.de/", sub { print $_[1] };
+
+   # ... do something else here
+
 =head1 DESCRIPTION
 
 This module is an L<AnyEvent> user, you need to make sure that you use and
@@ -46,9 +50,9 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 
-our @EXPORT = qw(http_get http_request);
+our @EXPORT = qw(http_get http_post http_head http_request);
 
 our $USERAGENT          = "Mozilla/5.0 (compatible; AnyEvent::HTTP/$VERSION; +http://software.schmorp.de/pkg/AnyEvent)";
 our $MAX_RECURSE        =  10;
@@ -91,10 +95,13 @@ The callback will be called with the response data as first argument
 response headers as second argument.
 
 All the headers in that hash are lowercased. In addition to the response
-headers, the three "pseudo-headers" C<HTTPVersion>, C<Status> and
-C<Reason> contain the three parts of the HTTP Status-Line of the same
-name. If the server sends a header multiple lines, then their contents
-will be joined together with C<\x00>.
+headers, the "pseudo-headers" C<HTTPVersion>, C<Status> and C<Reason>
+contain the three parts of the HTTP Status-Line of the same name. The
+pseudo-header C<URL> contains the original URL (which can differ from the
+requested URL when following redirects).
+
+If the server sends a header multiple lines, then their contents will be
+joined together with C<\x00>.
 
 If an internal error occurs, such as not being able to resolve a hostname,
 then C<$data> will be C<undef>, C<< $headers->{Status} >> will be C<599>
@@ -232,7 +239,7 @@ sub http_request($$@) {
 
    my $recurse = exists $arg{recurse} ? $arg{recurse} : $MAX_RECURSE;
 
-   return $cb->(undef, { Status => 599, Reason => "recursion limit reached" })
+   return $cb->(undef, { Status => 599, Reason => "recursion limit reached", URL => $url })
       if $recurse < 0;
 
    my $proxy   = $arg{proxy}   || $PROXY;
@@ -247,12 +254,12 @@ sub http_request($$@) {
 
    my $uport = $scheme eq "http"  ?  80
              : $scheme eq "https" ? 443
-             : return $cb->(undef, { Status => 599, Reason => "only http and https URL schemes supported" });
+             : return $cb->(undef, { Status => 599, Reason => "only http and https URL schemes supported", URL => $url });
 
    $hdr{referer} ||= "$scheme://$authority$upath"; # leave out fragment and query string, just a heuristic
 
    $authority =~ /^(?: .*\@ )? ([^\@:]+) (?: : (\d+) )?$/x
-      or return $cb->(undef, { Status => 599, Reason => "unparsable URL" });
+      or return $cb->(undef, { Status => 599, Reason => "unparsable URL", URL => $url });
 
    my $uhost = $1;
    $uport = $2 if defined $2;
@@ -307,7 +314,7 @@ sub http_request($$@) {
 
       $state{connect_guard} = AnyEvent::Socket::tcp_connect $rhost, $rport, sub {
          $state{fh} = shift
-            or return $cb->(undef, { Status => 599, Reason => "$!" });
+            or return $cb->(undef, { Status => 599, Reason => "$!", URL => $url });
 
          delete $state{connect_guard}; # reduce memory usage, save a tree
 
@@ -331,11 +338,11 @@ sub http_request($$@) {
          $state{handle}->on_error (sub {
             my $errno = "$!";
             %state = ();
-            $cb->(undef, { Status => 599, Reason => $errno });
+            $cb->(undef, { Status => 599, Reason => $errno, URL => $url });
          });
          $state{handle}->on_eof (sub {
             %state = ();
-            $cb->(undef, { Status => 599, Reason => "unexpected end-of-file" });
+            $cb->(undef, { Status => 599, Reason => "unexpected end-of-file", URL => $url });
          });
 
          # send request
@@ -351,12 +358,13 @@ sub http_request($$@) {
          # status line
          $state{handle}->push_read (line => qr/\015?\012/, sub {
             $_[1] =~ /^HTTP\/([0-9\.]+) \s+ ([0-9]{3}) \s+ ([^\015\012]+)/ix
-               or return (%state = (), $cb->(undef, { Status => 599, Reason => "invalid server response ($_[1])" }));
+               or return (%state = (), $cb->(undef, { Status => 599, Reason => "invalid server response ($_[1])", URL => $url }));
 
             my %hdr = ( # response headers
                HTTPVersion => "\x00$1",
                Status      => "\x00$2",
                Reason      => "\x00$3",
+               URL         => "\x00$url"
             );
 
             # headers, could be optimized a bit
@@ -373,7 +381,7 @@ sub http_request($$@) {
                         /gxc;
 
                   /\G$/
-                    or return (%state = (), $cb->(undef, { Status => 599, Reason => "garbled response headers" }));
+                    or return (%state = (), $cb->(undef, { Status => 599, Reason => "garbled response headers", URL => $url }));
                }
 
                substr $_, 0, 1, ""
@@ -519,8 +527,8 @@ L<AnyEvent>.
 
 =head1 AUTHOR
 
- Marc Lehmann <schmorp@schmorp.de>
- http://home.schmorp.de/
+   Marc Lehmann <schmorp@schmorp.de>
+   http://home.schmorp.de/
 
 =cut
 
