@@ -50,7 +50,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '1.02';
+our $VERSION = '1.03';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -237,7 +237,7 @@ sub http_request($$@) {
       }
    }
 
-   my $recurse = exists $arg{recurse} ? $arg{recurse} : $MAX_RECURSE;
+   my $recurse = exists $arg{recurse} ? delete $arg{recurse} : $MAX_RECURSE;
 
    return $cb->(undef, { Status => 599, Reason => "recursion limit reached", URL => $url })
       if $recurse < 0;
@@ -414,12 +414,21 @@ sub http_request($$@) {
                      }
                   }
 
-                  if ($_[1]{Status} =~ /^30[12]$/ && $recurse) {
-                     # microsoft and other assholes don't give a shit for following standards,
-                     # try to support a common form of broken Location header.
-                     $_[1]{location} =~ s%^/%$scheme://$uhost:$uport/%;
+                  # microsoft and other assholes don't give a shit for following standards,
+                  # try to support a common form of broken Location header.
+                  $_[1]{location} =~ s%^/%$scheme://$uhost:$uport/%
+                     if exists $_[1]{location};
 
+                  if ($_[1]{Status} =~ /^30[12]$/ && $recurse && $method ne "POST") {
+                     # apparently, mozilla et al. just change POST to GET here
+                     # more research is needed before we do the same
                      http_request ($method, $_[1]{location}, %arg, recurse => $recurse - 1, $cb);
+                  } elsif ($_[1]{Status} == 303 && $recurse) {
+                     # even http/1.1 is unlear on how to mutate the method
+                     $method = "GET" unless $method eq "HEAD";
+                     http_request ($method => $_[1]{location}, %arg, recurse => $recurse - 1, $cb);
+                  } elsif ($_[1]{Status} == 307 && $recurse && $method =~ /^(?:GET|HEAD)$/) {
+                     http_request ($method => $_[1]{location}, %arg, recurse => $recurse - 1, $cb);
                   } else {
                      $cb->($_[0], $_[1]);
                   }
@@ -468,7 +477,8 @@ sub http_head($@) {
 }
 
 sub http_post($$@) {
-   unshift @_, "POST", "body";
+   my $url = shift;
+   unshift @_, "POST", $url, "body";
    &http_request
 }
 
