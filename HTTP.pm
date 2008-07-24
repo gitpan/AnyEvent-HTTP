@@ -50,7 +50,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '1.03';
+our $VERSION = '1.04';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -82,7 +82,7 @@ additional parameters.
 
 =item http_post $url, $body, key => value..., $cb->($data, $headers)
 
-Executes an HTTP-POST request with a request body of C<$bod>. See the
+Executes an HTTP-POST request with a request body of C<$body>. See the
 http_request function for details on additional parameters.
 
 =item http_request $method => $url, key => value..., $cb->($data, $headers)
@@ -357,7 +357,7 @@ sub http_request($$@) {
 
          # status line
          $state{handle}->push_read (line => qr/\015?\012/, sub {
-            $_[1] =~ /^HTTP\/([0-9\.]+) \s+ ([0-9]{3}) \s+ ([^\015\012]+)/ix
+            $_[1] =~ /^HTTP\/([0-9\.]+) \s+ ([0-9]{3}) (?: \s+ ([^\015\012]*) )?/ix
                or return (%state = (), $cb->(undef, { Status => 599, Reason => "invalid server response ($_[1])", URL => $url }));
 
             my %hdr = ( # response headers
@@ -414,10 +414,20 @@ sub http_request($$@) {
                      }
                   }
 
-                  # microsoft and other assholes don't give a shit for following standards,
-                  # try to support a common form of broken Location header.
-                  $_[1]{location} =~ s%^/%$scheme://$uhost:$uport/%
-                     if exists $_[1]{location};
+                  # microsoft and other shitheads don't give a shit for following standards,
+                  # try to support some common forms of broken Location headers.
+                  if ($_[1]{location} !~ /^(?: $ | [^:\/?\#]+ : )/x) {
+                     $_[1]{location} =~ s/^\.\/+//;
+
+                     my $url = "$scheme://$uhost:$uport";
+
+                     unless ($_[1]{location} =~ s/^\///) {
+                        $url .= $upath;
+                        $url =~ s/\/[^\/]*$//;
+                     }
+
+                     $_[1]{location} = "$url/$_[1]{location}";
+                  }
 
                   if ($_[1]{Status} =~ /^30[12]$/ && $recurse && $method ne "POST") {
                      # apparently, mozilla et al. just change POST to GET here
