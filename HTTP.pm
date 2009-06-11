@@ -50,7 +50,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '1.11';
+our $VERSION = '1.12';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -322,10 +322,10 @@ sub http_request($$@) {
    my ($rhost, $rport, $rscheme, $rpath); # request host, port, path
 
    if ($proxy) {
-      ($rhost, $rport, $rscheme, $rpath) = (@$proxy, $url);
+      ($rpath, $rhost, $rport, $rscheme) = ($url, @$proxy);
 
       # don't support https requests over https-proxy transport,
-      # can't be done with tls as spec'ed.
+      # can't be done with tls as spec'ed, unless you double-encrypt.
       $rscheme = "http" if $uscheme eq "https" && $rscheme eq "https";
    } else {
       ($rhost, $rport, $rscheme, $rpath) = ($uhost, $uport, $uscheme, $upath);
