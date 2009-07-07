@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               AnyEvent-HTTP
-version:            1.12
+version:            1.4
 abstract:           ~
 author:  []
 license:            unknown
@@ -10,12 +10,12 @@ configure_requires:
 build_requires:
     ExtUtils::MakeMaker:  0
 requires:
-    AnyEvent:  4.31
+    AnyEvent:  4.8
 no_index:
     directory:
         - t
         - inc
-generated_by:       ExtUtils::MakeMaker version 6.52
+generated_by:       ExtUtils::MakeMaker version 6.50
 meta-spec:
     url:      http://module-build.sourceforge.net/META-spec-v1.4.html
     version:  1.4

@@ -41,27 +41,27 @@ package AnyEvent::HTTP;
 use strict;
 no warnings;
 
-use Carp;
+use Errno ();
 
-use AnyEvent ();
+use AnyEvent 4.8 ();
 use AnyEvent::Util ();
 use AnyEvent::Socket ();
 use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '1.12';
+our $VERSION = '1.4';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
-our $USERAGENT          = "Mozilla/5.0 (compatible; AnyEvent::HTTP/$VERSION; +http://software.schmorp.de/pkg/AnyEvent)";
+our $USERAGENT          = "Mozilla/5.0 (compatible; U; AnyEvent-HTTP/$VERSION; +http://software.schmorp.de/pkg/AnyEvent)";
 our $MAX_RECURSE        =  10;
 our $MAX_PERSISTENT     =   8;
 our $PERSISTENT_TIMEOUT =   2;
 our $TIMEOUT            = 300;
 
 # changing these is evil
-our $MAX_PERSISTENT_PER_HOST = 2;
+our $MAX_PERSISTENT_PER_HOST = 0;
 our $MAX_PER_HOST       = 4;
 
 our $PROXY;
@@ -96,9 +96,9 @@ C<http_request> returns a "cancellation guard" - you have to keep the
 object at least alive until the callback get called. If the object gets
 destroyed before the callbakc is called, the request will be cancelled.
 
-The callback will be called with the response data as first argument
-(or C<undef> if it wasn't available due to errors), and a hash-ref with
-response headers as second argument.
+The callback will be called with the response body data as first argument
+(or C<undef> if an error occured), and a hash-ref with response headers as
+second argument.
 
 All the headers in that hash are lowercased. In addition to the response
 headers, the "pseudo-headers" C<HTTPVersion>, C<Status> and C<Reason>
@@ -110,8 +110,9 @@ If the server sends a header multiple times, then their contents will be
 joined together with a comma (C<,>), as per the HTTP spec.
 
 If an internal error occurs, such as not being able to resolve a hostname,
-then C<$data> will be C<undef>, C<< $headers->{Status} >> will be C<599>
-and the C<Reason> pseudo-header will contain an error message.
+then C<$data> will be C<undef>, C<< $headers->{Status} >> will be C<59x>
+(usually C<599>) and the C<Reason> pseudo-header will contain an error
+message.
 
 A typical callback might look like this:
 
@@ -167,13 +168,84 @@ based on the original netscape specification.
 The C<$hash_ref> must be an (initially empty) hash reference which will
 get updated automatically. It is possible to save the cookie_jar to
 persistent storage with something like JSON or Storable, but this is not
-recommended, as expire times are currently being ignored.
+recommended, as expiry times are currently being ignored.
 
 Note that this cookie implementation is not of very high quality, nor
 meant to be complete. If you want complete cookie management you have to
 do that on your own. C<cookie_jar> is meant as a quick fix to get some
 cookie-using sites working. Cookies are a privacy disaster, do not use
 them unless required to.
+
+=item tls_ctx => $scheme | $tls_ctx
+
+Specifies the AnyEvent::TLS context to be used for https connections. This
+parameter follows the same rules as the C<tls_ctx> parameter to
+L<AnyEvent::Handle>, but additionally, the two strings C<low> or
+C<high> can be specified, which give you a predefined low-security (no
+verification, highest compatibility) and high-security (CA and common-name
+verification) TLS context.
+
+The default for this option is C<low>, which could be interpreted as "give
+me the page, no matter what".
+
+=item on_header => $callback->($headers)
+
+When specified, this callback will be called with the header hash as soon
+as headers have been successfully received from the remote server (not on
+locally-generated errors).
+
+It has to return either true (in which case AnyEvent::HTTP will continue),
+or false, in which case AnyEvent::HTTP will cancel the download (and call
+the finish callback with an error code of C<598>).
+
+This callback is useful, among other things, to quickly reject unwanted
+content, which, if it is supposed to be rare, can be faster than first
+doing a C<HEAD> request.
+
+Example: cancel the request unless the content-type is "text/html".
+
+   on_header => sub {
+      $_[0]{"content-type"} =~ /^text\/html\s*(?:;|$)/
+   },
+
+=item on_body => $callback->($partial_body, $headers)
+
+When specified, all body data will be passed to this callback instead of
+to the completion callback. The completion callback will get the empty
+string instead of the body data.
+
+It has to return either true (in which case AnyEvent::HTTP will continue),
+or false, in which case AnyEvent::HTTP will cancel the download (and call
+the completion callback with an error code of C<598>).
+
+This callback is useful when the data is too large to be held in memory
+(so the callback writes it to a file) or when only some information should
+be extracted, or when the body should be processed incrementally.
+
+It is usually preferred over doing your own body handling via
+C<want_body_handle>.
+
+=item want_body_handle => $enable
+
+When enabled (default is disabled), the behaviour of AnyEvent::HTTP
+changes considerably: after parsing the headers, and instead of
+downloading the body (if any), the completion callback will be
+called. Instead of the C<$body> argument containing the body data, the
+callback will receive the L<AnyEvent::Handle> object associated with the
+connection. In error cases, C<undef> will be passed. When there is no body
+(e.g. status C<304>), the empty string will be passed.
+
+The handle object might or might not be in TLS mode, might be connected to
+a proxy, be a persistent connection etc., and configured in unspecified
+ways. The user is responsible for this handle (it will not be used by this
+module anymore).
+
+This is useful with some push-type services, where, after the initial
+headers, an interactive protocol is used (typical example would be the
+push-style twitter API which starts a JSON/XML stream).
+
+If you think you need this, first have a look at C<on_body>, to see if
+that doesn'T solve your problem in a better way.
 
 =back
 
@@ -242,11 +314,17 @@ sub _get_slot($$) {
 our $qr_nl   = qr<\015?\012>;
 our $qr_nlnl = qr<\015?\012\015?\012>;
 
+our $TLS_CTX_LOW  = { cache => 1, sslv2 => 1 };
+our $TLS_CTX_HIGH = { cache => 1, verify => 1, verify_peername => "https" };
+
 sub http_request($$@) {
    my $cb = pop;
    my ($method, $url, %arg) = @_;
 
    my %hdr;
+
+   $arg{tls_ctx} = $TLS_CTX_LOW  if $arg{tls_ctx} eq "low" || !exists $arg{tls_ctx};
+   $arg{tls_ctx} = $TLS_CTX_HIGH if $arg{tls_ctx} eq "high";
 
    $method = uc $method;
 
@@ -258,13 +336,11 @@ sub http_request($$@) {
 
    my $recurse = exists $arg{recurse} ? delete $arg{recurse} : $MAX_RECURSE;
 
-   return $cb->(undef, { Status => 599, Reason => "recursion limit reached", URL => $url })
+   return $cb->(undef, { Status => 599, Reason => "Too many redirections", URL => $url })
       if $recurse < 0;
 
    my $proxy   = $arg{proxy}   || $PROXY;
    my $timeout = $arg{timeout} || $TIMEOUT;
-
-   $hdr{"user-agent"} ||= $USERAGENT;
 
    my ($uscheme, $uauthority, $upath, $query, $fragment) =
       $url =~ m|(?:([^:/?#]+):)?(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?|;
@@ -273,15 +349,15 @@ sub http_request($$@) {
 
    my $uport = $uscheme eq "http"  ?  80
              : $uscheme eq "https" ? 443
-             : return $cb->(undef, { Status => 599, Reason => "only http and https URL schemes supported", URL => $url });
-
-   $hdr{referer} ||= "$uscheme://$uauthority$upath"; # leave out fragment and query string, just a heuristic
+             : return $cb->(undef, { Status => 599, Reason => "Only http and https URL schemes supported", URL => $url });
 
    $uauthority =~ /^(?: .*\@ )? ([^\@:]+) (?: : (\d+) )?$/x
-      or return $cb->(undef, { Status => 599, Reason => "unparsable URL", URL => $url });
+      or return $cb->(undef, { Status => 599, Reason => "Unparsable URL", URL => $url });
 
    my $uhost = $1;
    $uport = $2 if defined $2;
+
+   $hdr{host} = defined $2 ? "$uhost:$2" : "$uhost";
 
    $uhost =~ s/^\[(.*)\]$/$1/;
    $upath .= "?$query" if length $query;
@@ -331,7 +407,9 @@ sub http_request($$@) {
       ($rhost, $rport, $rscheme, $rpath) = ($uhost, $uport, $uscheme, $upath);
    }
 
-   $hdr{host} = $uhost;
+   $hdr{"user-agent"} ||= $USERAGENT;
+   $hdr{referer}      ||= "$uscheme://$uauthority$upath"; # leave out fragment and query string, just a heuristic
+
    $hdr{"content-length"} = length $arg{body};
 
    my %state = (connect_guard => 1);
@@ -343,15 +421,22 @@ sub http_request($$@) {
 
       $state{connect_guard} = AnyEvent::Socket::tcp_connect $rhost, $rport, sub {
          $state{fh} = shift
-            or return $cb->(undef, { Status => 599, Reason => "$!", URL => $url });
+            or do {
+               my $err = "$!";
+               %state = ();
+               return $cb->(undef, { Status => 599, Reason => $err, URL => $url });
+            };
+
          pop; # free memory, save a tree
 
          return unless delete $state{connect_guard};
 
          # get handle
          $state{handle} = new AnyEvent::Handle
-            fh      => $state{fh},
-            timeout => $timeout;
+            fh       => $state{fh},
+            timeout  => $timeout,
+            peername => $rhost,
+            tls_ctx  => $arg{tls_ctx};
 
          # limit the number of persistent connections
          # keepalive not yet supported
@@ -367,13 +452,12 @@ sub http_request($$@) {
 
          # (re-)configure handle
          $state{handle}->on_error (sub {
-            my $errno = "$!";
             %state = ();
-            $cb->(undef, { Status => 599, Reason => $errno, URL => $url });
+            $cb->(undef, { Status => 599, Reason => $_[2], URL => $url });
          });
          $state{handle}->on_eof (sub {
             %state = ();
-            $cb->(undef, { Status => 599, Reason => "unexpected end-of-file", URL => $url });
+            $cb->(undef, { Status => 599, Reason => "Unexpected end-of-file", URL => $url });
          });
 
          $state{handle}->starttls ("connect") if $rscheme eq "https";
@@ -395,7 +479,7 @@ sub http_request($$@) {
             # status line
             $state{handle}->push_read (line => $qr_nl, sub {
                $_[1] =~ /^HTTP\/([0-9\.]+) \s+ ([0-9]{3}) (?: \s+ ([^\015\012]*) )?/ix
-                  or return (%state = (), $cb->(undef, { Status => 599, Reason => "invalid server response ($_[1])", URL => $url }));
+                  or return (%state = (), $cb->(undef, { Status => 599, Reason => "Invalid server response ($_[1])", URL => $url }));
 
                my %hdr = ( # response headers
                   HTTPVersion => ",$1",
@@ -409,31 +493,63 @@ sub http_request($$@) {
                   for ("$_[1]\012") {
                      y/\015//d; # weed out any \015, as they show up in the weirdest of places.
 
-                     # we support spaces in field names, as lotus domino
-                     # creates them (actually spaces around seperators
-                     # are strictly allowed in http, they are a security issue).
+                     # things seen, not parsed:
+                     # p3pP="NON CUR OTPi OUR NOR UNI"
+
                      $hdr{lc $1} .= ",$2"
                         while /\G
-                              ([^:\000-\037]+):
+                              ([^:\000-\037]*):
                               [\011\040]*
                               ((?: [^\012]+ | \012[\011\040] )*)
                               \012
                            /gxc;
 
                      /\G$/
-                       or return (%state = (), $cb->(undef, { Status => 599, Reason => "garbled response headers", URL => $url }));
+                       or return (%state = (), $cb->(undef, { Status => 599, Reason => "Garbled response headers", URL => $url }));
                   }
 
                   substr $_, 0, 1, ""
                      for values %hdr;
 
+                  # redirect handling
+                  # microsoft and other shitheads don't give a shit for following standards,
+                  # try to support some common forms of broken Location headers.
+                  if ($hdr{location} !~ /^(?: $ | [^:\/?\#]+ : )/x) {
+                     $hdr{location} =~ s/^\.\/+//;
+
+                     my $url = "$rscheme://$uhost:$uport";
+
+                     unless ($hdr{location} =~ s/^\///) {
+                        $url .= $upath;
+                        $url =~ s/\/[^\/]*$//;
+                     }
+
+                     $hdr{location} = "$url/$hdr{location}";
+                  }
+
+                  my $redirect;
+
+                  if ($recurse) {
+                     if ($hdr{Status} =~ /^30[12]$/ && $method ne "POST") {
+                        # apparently, mozilla et al. just change POST to GET here
+                        # more research is needed before we do the same
+                        $redirect = 1;
+                     } elsif ($hdr{Status} == 303) {
+                        # even http/1.1 is unclear on how to mutate the method
+                        $method = "GET" unless $method eq "HEAD";
+                        $redirect = 1;
+                     } elsif ($hdr{Status} == 307 && $method =~ /^(?:GET|HEAD)$/) {
+                        $redirect = 1;
+                     }
+                  }
+
                   my $finish = sub {
-                     $state{handle}->destroy;
+                     $state{handle}->destroy if $state{handle};
                      %state = ();
 
                      # set-cookie processing
                      if ($arg{cookie_jar}) {
-                        for ($hdr{"set-cookie"}) {
+                        for ($_[1]{"set-cookie"}) {
                            # parse NAME=VALUE
                            my @kv;
 
@@ -481,58 +597,77 @@ sub http_request($$@) {
                         }
                      }
 
-                     # microsoft and other shitheads don't give a shit for following standards,
-                     # try to support some common forms of broken Location headers.
-                     if ($_[1]{location} !~ /^(?: $ | [^:\/?\#]+ : )/x) {
-                        $_[1]{location} =~ s/^\.\/+//;
-
-                        my $url = "$rscheme://$uhost:$uport";
-
-                        unless ($_[1]{location} =~ s/^\///) {
-                           $url .= $upath;
-                           $url =~ s/\/[^\/]*$//;
-                        }
-
-                        $_[1]{location} = "$url/$_[1]{location}";
-                     }
-
-                     if ($_[1]{Status} =~ /^30[12]$/ && $recurse && $method ne "POST") {
-                        # apparently, mozilla et al. just change POST to GET here
-                        # more research is needed before we do the same
-                        http_request ($method, $_[1]{location}, %arg, recurse => $recurse - 1, $cb);
-                     } elsif ($_[1]{Status} == 303 && $recurse) {
-                        # even http/1.1 is unclear on how to mutate the method
-                        $method = "GET" unless $method eq "HEAD";
-                        http_request ($method => $_[1]{location}, %arg, recurse => $recurse - 1, $cb);
-                     } elsif ($_[1]{Status} == 307 && $recurse && $method =~ /^(?:GET|HEAD)$/) {
-                        http_request ($method => $_[1]{location}, %arg, recurse => $recurse - 1, $cb);
+                     if ($redirect) {
+                        # we ignore any errors, as it is very common to receive
+                        # Content-Length != 0 but no actual body
+                        # we also access %hdr, as $_[1] might be an erro
+                        http_request ($method => $hdr{location}, %arg, recurse => $recurse - 1, $cb);
                      } else {
                         $cb->($_[0], $_[1]);
                      }
                   };
 
-                  if ($hdr{Status} =~ /^(?:1..|204|304)$/ or $method eq "HEAD") {
-                     $finish->(undef, \%hdr);
-                  } else {
-                     if (exists $hdr{"content-length"}) {
-                        $_[0]->unshift_read (chunk => $hdr{"content-length"}, sub {
-                           # could cache persistent connection now
-                           if ($hdr{connection} =~ /\bkeep-alive\b/i) {
-                              # but we don't, due to misdesigns, this is annoyingly complex
-                           };
+                  my $len = $hdr{"content-length"};
 
-                           $finish->($_[1], \%hdr);
-                        });
-                     } else {
-                        # too bad, need to read until we get an error or EOF,
-                        # no way to detect winged data.
-                        $_[0]->on_error (sub {
-                           # delete ought to be more efficient, as we would have to make
-                           # a copy otherwise as $_[0] gets destroyed.
-                           $finish->(delete $_[0]{rbuf}, \%hdr);
-                        });
+                  if (!$redirect && $arg{on_header} && !$arg{on_header}(\%hdr)) {
+                     $finish->(undef, { Status => 598, Reason => "Request cancelled by on_header", URL => $url });
+                  } elsif (
+                     $hdr{Status} =~ /^(?:1..|[23]04)$/
+                     or $method eq "HEAD"
+                     or (defined $len && !$len)
+                  ) {
+                     # no body
+                     $finish->("", \%hdr);
+                  } else {
+                     # body handling, four different code paths
+                     # for want_body_handle, on_body (2x), normal (2x)
+                     # we might read too much here, but it does not matter yet (no pers. connections)
+                     if (!$redirect && $arg{want_body_handle}) {
                         $_[0]->on_eof (undef);
-                        $_[0]->on_read (sub { });
+                        $_[0]->on_error (undef);
+                        $_[0]->on_read  (undef);
+
+                        $finish->(delete $state{handle}, \%hdr);
+
+                     } elsif ($arg{on_body}) {
+                        $_[0]->on_error (sub { $finish->(undef, { Status => 599, Reason => $_[2], URL => $url }) });
+                        if ($len) {
+                           $_[0]->on_eof (undef);
+                           $_[0]->on_read (sub {
+                              $len -= length $_[0]{rbuf};
+
+                              $arg{on_body}(delete $_[0]{rbuf}, \%hdr)
+                                 or $finish->(undef, { Status => 598, Reason => "Request cancelled by on_body", URL => $url });
+
+                              $len > 0
+                                 or $finish->("", \%hdr);
+                           });
+                        } else {
+                           $_[0]->on_eof (sub {
+                              $finish->("", \%hdr);
+                           });
+                           $_[0]->on_read (sub {
+                              $arg{on_body}(delete $_[0]{rbuf}, \%hdr)
+                                 or $finish->(undef, { Status => 598, Reason => "Request cancelled by on_body", URL => $url });
+                           });
+                        }
+                     } else {
+                        $_[0]->on_eof (undef);
+
+                        if ($len) {
+                           $_[0]->on_error (sub { $finish->(undef, { Status => 599, Reason => $_[2], URL => $url }) });
+                           $_[0]->on_read (sub {
+                              $finish->((substr delete $_[0]{rbuf}, 0, $len, ""), \%hdr)
+                                 if $len <= length $_[0]{rbuf};
+                           });
+                        } else {
+                           $_[0]->on_error (sub {
+                              $! == Errno::EPIPE || !$!
+                                 ? $finish->(delete $_[0]{rbuf}, \%hdr)
+                                 : $finish->(undef, { Status => 599, Reason => $_[2], URL => $url });
+                           });
+                           $_[0]->on_read (sub { });
+                        }
                      }
                   }
                });
@@ -547,7 +682,7 @@ sub http_request($$@) {
             $state{handle}->push_write ("CONNECT $uhost:$uport HTTP/1.0\015\012Host: $uhost\015\012\015\012");
             $state{handle}->push_read (line => $qr_nlnl, sub {
                $_[1] =~ /^HTTP\/([0-9\.]+) \s+ ([0-9]{3}) (?: \s+ ([^\015\012]*) )?/ix
-                  or return (%state = (), $cb->(undef, { Status => 599, Reason => "invalid proxy connect response ($_[1])", URL => $url }));
+                  or return (%state = (), $cb->(undef, { Status => 599, Reason => "Invalid proxy connect response ($_[1])", URL => $url }));
 
                if ($2 == 200) {
                   $rpath = $upath;
@@ -603,19 +738,16 @@ The default value for the C<recurse> request parameter (default: C<10>).
 =item $AnyEvent::HTTP::USERAGENT
 
 The default value for the C<User-Agent> header (the default is
-C<Mozilla/5.0 (compatible; AnyEvent::HTTP/$VERSION; +http://software.schmorp.de/pkg/AnyEvent)>).
+C<Mozilla/5.0 (compatible; U; AnyEvent-HTTP/$VERSION; +http://software.schmorp.de/pkg/AnyEvent)>).
 
-=item $AnyEvent::HTTP::MAX_PERSISTENT
+=item $AnyEvent::HTTP::MAX_PER_HOST
 
-The maximum number of persistent connections to keep open (default: 8).
+The maximum number of concurrent conenctions to the same host (identified
+by the hostname). If the limit is exceeded, then the additional requests
+are queued until previous connections are closed.
 
-Not implemented currently.
-
-=item $AnyEvent::HTTP::PERSISTENT_TIMEOUT
-
-The maximum time to cache a persistent connection, in seconds (default: 2).
-
-Not implemented currently.
+The default value for this is C<4>, and it is highly advisable to not
+increase it.
 
 =item $AnyEvent::HTTP::ACTIVE
 
