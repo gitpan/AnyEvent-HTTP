@@ -50,7 +50,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '1.4';
+our $VERSION = '1.41';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -223,7 +223,10 @@ This callback is useful when the data is too large to be held in memory
 be extracted, or when the body should be processed incrementally.
 
 It is usually preferred over doing your own body handling via
-C<want_body_handle>.
+C<want_body_handle>, but in case of streaming APIs, where HTTP is
+only used to create a connection, C<want_body_handle> is the better
+alternative, as it allows you to install your own event handler, reducing
+resource usage.
 
 =item want_body_handle => $enable
 
@@ -245,7 +248,7 @@ headers, an interactive protocol is used (typical example would be the
 push-style twitter API which starts a JSON/XML stream).
 
 If you think you need this, first have a look at C<on_body>, to see if
-that doesn'T solve your problem in a better way.
+that doesn't solve your problem in a better way.
 
 =back
 
@@ -311,8 +314,8 @@ sub _get_slot($$) {
    _slot_schedule $_[0];
 }
 
-our $qr_nl   = qr<\015?\012>;
-our $qr_nlnl = qr<\015?\012\015?\012>;
+our $qr_nl   = qr{\015?\012};
+our $qr_nlnl = qr{(?<![^\012])\015?\012};
 
 our $TLS_CTX_LOW  = { cache => 1, sslv2 => 1 };
 our $TLS_CTX_HIGH = { cache => 1, verify => 1, verify_peername => "https" };
@@ -490,7 +493,7 @@ sub http_request($$@) {
 
                # headers, could be optimized a bit
                $state{handle}->unshift_read (line => $qr_nlnl, sub {
-                  for ("$_[1]\012") {
+                  for ("$_[1]") {
                      y/\015//d; # weed out any \015, as they show up in the weirdest of places.
 
                      # things seen, not parsed:
