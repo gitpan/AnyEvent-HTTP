@@ -50,7 +50,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '1.43';
+our $VERSION = '1.44';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -374,7 +374,8 @@ sub http_request($$@) {
    my $uhost = $1;
    $uport = $2 if defined $2;
 
-   $hdr{host} = defined $2 ? "$uhost:$2" : "$uhost";
+   $hdr{host} = defined $2 ? "$uhost:$2" : "$uhost"
+      unless exists $hdr{host};
 
    $uhost =~ s/^\[(.*)\]$/$1/;
    $upath .= "?$query" if length $query;
@@ -430,7 +431,8 @@ sub http_request($$@) {
    $hdr{referer}      ||= "$uscheme://$uauthority$upath" unless exists $hdr{referer};
    $hdr{"user-agent"} ||= $USERAGENT                     unless exists $hdr{"user-agent"};
 
-   $hdr{"content-length"} = length $arg{body};
+   $hdr{"content-length"} = length $arg{body}
+      if length $arg{body} || $method ne "GET";
 
    my %state = (connect_guard => 1);
 
@@ -747,7 +749,10 @@ sub http_post($$@) {
 =item AnyEvent::HTTP::set_proxy "proxy-url"
 
 Sets the default proxy server to use. The proxy-url must begin with a
-string of the form C<http://host:port> (optionally C<https:...>).
+string of the form C<http://host:port> (optionally C<https:...>), croaks
+otherwise.
+
+To clear an already-set proxy, use C<undef>.
 
 =item $AnyEvent::HTTP::MAX_RECURSE
 
@@ -778,11 +783,19 @@ connections. This number of can be useful for load-leveling.
 =cut
 
 sub set_proxy($) {
-   $PROXY = [$2, $3 || 3128, $1] if $_[0] =~ m%^(https?):// ([^:/]+) (?: : (\d*) )?%ix;
+   if (length $_[0]) {
+      $_[0] =~ m%^(https?):// ([^:/]+) (?: : (\d*) )?%ix
+         or Carp::croak "$_[0]: invalid proxy URL";
+      $PROXY = [$2, $3 || 3128, $1]
+   } else {
+      undef $PROXY;
+   }
 }
 
 # initialise proxy from environment
-set_proxy $ENV{http_proxy};
+eval {
+   set_proxy $ENV{http_proxy};
+};
 
 =head1 SEE ALSO
 

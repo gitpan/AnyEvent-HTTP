@@ -9,9 +9,9 @@
       "version" : 1.4,
       "url" : "http://module-build.sourceforge.net/META-spec-v1.4.html"
    },
-   "generated_by" : "ExtUtils::MakeMaker version 6.50",
+   "generated_by" : "ExtUtils::MakeMaker version 6.54",
    "distribution_type" : "module",
-   "version" : "1.43",
+   "version" : "1.44",
    "name" : "AnyEvent-HTTP",
    "author" : [],
    "license" : "unknown",
