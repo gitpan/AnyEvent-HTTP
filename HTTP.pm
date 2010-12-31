@@ -45,12 +45,11 @@ use Errno ();
 
 use AnyEvent 5.0 ();
 use AnyEvent::Util ();
-use AnyEvent::Socket ();
 use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '1.46';
+our $VERSION = '1.5';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -94,7 +93,7 @@ must be an absolute http or https URL.
 When called in void context, nothing is returned. In other contexts,
 C<http_request> returns a "cancellation guard" - you have to keep the
 object at least alive until the callback get called. If the object gets
-destroyed before the callbakc is called, the request will be cancelled.
+destroyed before the callback is called, the request will be cancelled.
 
 The callback will be called with the response body data as first argument
 (or C<undef> if an error occured), and a hash-ref with response headers as
@@ -103,7 +102,10 @@ second argument.
 All the headers in that hash are lowercased. In addition to the response
 headers, the "pseudo-headers" (uppercase to avoid clashing with possible
 response headers) C<HTTPVersion>, C<Status> and C<Reason> contain the
-three parts of the HTTP Status-Line of the same name.
+three parts of the HTTP Status-Line of the same name. If an error occurs
+during the body phase of a request, then the original C<Status> and
+C<Reason> values from the header are available as C<OrigStatus> and
+C<OrigReason>.
 
 The pseudo-header C<URL> contains the actual URL (which can differ from
 the requested URL when following redirects - for example, you might get
@@ -213,6 +215,18 @@ overrides the prepare callback passed to C<AnyEvent::Socket::tcp_connect>
 and behaves exactly the same way (e.g. it has to provide a
 timeout). See the description for the C<$prepare_cb> argument of
 C<AnyEvent::Socket::tcp_connect> for details.
+
+=item tcp_connect => $callback->($host, $service, $connect_cb, $prepare_cb)
+
+In even rarer cases you want total control over how AnyEvent::HTTP
+establishes connections. Normally it uses L<AnyEvent::Socket::tcp_connect>
+to do this, but you can provide your own C<tcp_connect> function -
+obviously, it has to follow the same calling conventions, except that it
+may always return a connection guard object.
+
+There are probably lots of weird uses for this function, starting from
+tracing the hosts C<http_request> actually tries to connect, to (inexact
+but fast) host => IP address caching or even socks protocol support.
 
 =item on_header => $callback->($headers)
 
@@ -368,7 +382,7 @@ sub http_request($$@) {
 
    my $recurse = exists $arg{recurse} ? delete $arg{recurse} : $MAX_RECURSE;
 
-   return $cb->(undef, { Status => 599, Reason => "Too many redirections", @pseudo })
+   return $cb->(undef, { @pseudo, Status => 599, Reason => "Too many redirections" })
       if $recurse < 0;
 
    my $proxy   = $arg{proxy}   || $PROXY;
@@ -381,10 +395,10 @@ sub http_request($$@) {
 
    my $uport = $uscheme eq "http"  ?  80
              : $uscheme eq "https" ? 443
-             : return $cb->(undef, { Status => 599, Reason => "Only http and https URL schemes supported", @pseudo });
+             : return $cb->(undef, { @pseudo, Status => 599, Reason => "Only http and https URL schemes supported" });
 
    $uauthority =~ /^(?: .*\@ )? ([^\@:]+) (?: : (\d+) )?$/x
-      or return $cb->(undef, { Status => 599, Reason => "Unparsable URL", @pseudo });
+      or return $cb->(undef, { @pseudo, Status => 599, Reason => "Unparsable URL" });
 
    my $uhost = $1;
    $uport = $2 if defined $2;
@@ -456,12 +470,12 @@ sub http_request($$@) {
 
       return unless $state{connect_guard};
 
-      $state{connect_guard} = AnyEvent::Socket::tcp_connect $rhost, $rport, sub {
+      my $connect_cb = sub {
          $state{fh} = shift
             or do {
                my $err = "$!";
                %state = ();
-               return $cb->(undef, { Status => 599, Reason => $err, @pseudo });
+               return $cb->(undef, { @pseudo, Status => 599, Reason => $err });
             };
 
          pop; # free memory, save a tree
@@ -477,11 +491,11 @@ sub http_request($$@) {
             timeout  => $timeout,
             on_error => sub {
                %state = ();
-               $cb->(undef, { Status => 599, Reason => $_[2], @pseudo });
+               $cb->(undef, { @pseudo, Status => 599, Reason => $_[2] });
             },
             on_eof   => sub {
                %state = ();
-               $cb->(undef, { Status => 599, Reason => "Unexpected end-of-file", @pseudo });
+               $cb->(undef, { @pseudo, Status => 599, Reason => "Unexpected end-of-file" });
             },
          ;
 
@@ -518,11 +532,13 @@ sub http_request($$@) {
 
             # status line and headers
             $state{handle}->push_read (line => $qr_nlnl, sub {
+               my $keepalive = pop;
+
                for ("$_[1]") {
                   y/\015//d; # weed out any \015, as they show up in the weirdest of places.
 
                   /^HTTP\/([0-9\.]+) \s+ ([0-9]{3}) (?: \s+ ([^\015\012]*) )? \015?\012/igxc
-                     or return (%state = (), $cb->(undef, { Status => 599, Reason => "Invalid server response", @pseudo }));
+                     or return (%state = (), $cb->(undef, { @pseudo, Status => 599, Reason => "Invalid server response" }));
 
                   push @pseudo,
                      HTTPVersion => $1,
@@ -542,7 +558,7 @@ sub http_request($$@) {
                         /gxc;
 
                   /\G$/
-                    or return (%state = (), $cb->(undef, { Status => 599, Reason => "Garbled response headers", @pseudo }));
+                    or return (%state = (), $cb->(undef, { @pseudo, Status => 599, Reason => "Garbled response headers" }));
                }
 
                # remove the "," prefix we added to all headers above
@@ -587,13 +603,18 @@ sub http_request($$@) {
                   }
                }
 
-               my $finish = sub {
+               my $finish = sub { # ($data, $err_status, $err_reason[, $keepalive])
                   $state{handle}->destroy if $state{handle};
                   %state = ();
 
+                  if (defined $_[1]) {
+                     $hdr{OrigStatus} = $hdr{Status}; $hdr{Status} = $_[1];
+                     $hdr{OrigReason} = $hdr{Reason}; $hdr{Reason} = $_[2];
+                  }
+
                   # set-cookie processing
                   if ($arg{cookie_jar}) {
-                     for ($_[1]{"set-cookie"}) {
+                     for ($hdr{"set-cookie"}) {
                         # parse NAME=VALUE
                         my @kv;
 
@@ -649,71 +670,70 @@ sub http_request($$@) {
                         $method  => $hdr{location},
                         %arg,
                         recurse  => $recurse - 1,
-                        Redirect => \@_,
+                        Redirect => [$_[0], \%hdr],
                         $cb);
                   } else {
-                     $cb->($_[0], $_[1]);
+                     $cb->($_[0], \%hdr);
                   }
                };
 
                my $len = $hdr{"content-length"};
 
                if (!$redirect && $arg{on_header} && !$arg{on_header}(\%hdr)) {
-                  $finish->(undef, { Status => 598, Reason => "Request cancelled by on_header", @pseudo });
+                  $finish->(undef, 598 => "Request cancelled by on_header");
                } elsif (
-                  $hdr{Status} =~ /^(?:1..|[23]04)$/
+                  $hdr{Status} =~ /^(?:1..|204|205|304)$/
                   or $method eq "HEAD"
                   or (defined $len && !$len)
                ) {
                   # no body
-                  $finish->("", \%hdr);
+                  $finish->("", undef, undef, 1);
                } else {
                   # body handling, four different code paths
                   # for want_body_handle, on_body (2x), normal (2x)
-                  # we might read too much here, but it does not matter yet (no pers. connections)
+                  # we might read too much here, but it does not matter yet (no pipelining)
                   if (!$redirect && $arg{want_body_handle}) {
                      $_[0]->on_eof   (undef);
                      $_[0]->on_error (undef);
                      $_[0]->on_read  (undef);
 
-                     $finish->(delete $state{handle}, \%hdr);
+                     $finish->(delete $state{handle});
 
                   } elsif ($arg{on_body}) {
-                     $_[0]->on_error (sub { $finish->(undef, { Status => 599, Reason => $_[2], @pseudo }) });
+                     $_[0]->on_error (sub { $finish->(undef, 599 => $_[2]) });
                      if ($len) {
-                        $_[0]->on_eof (undef);
                         $_[0]->on_read (sub {
                            $len -= length $_[0]{rbuf};
 
                            $arg{on_body}(delete $_[0]{rbuf}, \%hdr)
-                              or $finish->(undef, { Status => 598, Reason => "Request cancelled by on_body", @pseudo });
+                              or $finish->(undef, 598 => "Request cancelled by on_body");
 
                            $len > 0
-                              or $finish->("", \%hdr);
+                              or $finish->("", undef, undef, 1);
                         });
                      } else {
                         $_[0]->on_eof (sub {
-                           $finish->("", \%hdr);
+                           $finish->("");
                         });
                         $_[0]->on_read (sub {
                            $arg{on_body}(delete $_[0]{rbuf}, \%hdr)
-                              or $finish->(undef, { Status => 598, Reason => "Request cancelled by on_body", @pseudo });
+                              or $finish->(undef, 598 => "Request cancelled by on_body");
                         });
                      }
                   } else {
                      $_[0]->on_eof (undef);
 
                      if ($len) {
-                        $_[0]->on_error (sub { $finish->(undef, { Status => 599, Reason => $_[2], @pseudo }) });
+                        $_[0]->on_error (sub { $finish->(undef, 599 => $_[2]) });
                         $_[0]->on_read (sub {
-                           $finish->((substr delete $_[0]{rbuf}, 0, $len, ""), \%hdr)
+                           $finish->((substr delete $_[0]{rbuf}, 0, $len, ""), undef, undef, 1)
                               if $len <= length $_[0]{rbuf};
                         });
                      } else {
                         $_[0]->on_error (sub {
                            ($! == Errno::EPIPE || !$!)
-                              ? $finish->(delete $_[0]{rbuf}, \%hdr)
-                              : $finish->(undef, { Status => 599, Reason => $_[2], @pseudo });
+                              ? $finish->(delete $_[0]{rbuf})
+                              : $finish->(undef, 599 => $_[2]);
                         });
                         $_[0]->on_read (sub { });
                      }
@@ -730,21 +750,26 @@ sub http_request($$@) {
             $state{handle}->push_write ("CONNECT $uhost:$uport HTTP/1.0\015\012Host: $uhost\015\012\015\012");
             $state{handle}->push_read (line => $qr_nlnl, sub {
                $_[1] =~ /^HTTP\/([0-9\.]+) \s+ ([0-9]{3}) (?: \s+ ([^\015\012]*) )?/ix
-                  or return (%state = (), $cb->(undef, { Status => 599, Reason => "Invalid proxy connect response ($_[1])", @pseudo }));
+                  or return (%state = (), $cb->(undef, { @pseudo, Status => 599, Reason => "Invalid proxy connect response ($_[1])" }));
 
                if ($2 == 200) {
                   $rpath = $upath;
                   &$handle_actual_request;
                } else {
                   %state = ();
-                  $cb->(undef, { Status => $2, Reason => $3, @pseudo });
+                  $cb->(undef, { @pseudo, Status => $2, Reason => $3 });
                }
             });
          } else {
             &$handle_actual_request;
          }
+      };
 
-      }, $arg{on_prepare} || sub { $timeout };
+      my $tcp_connect = $arg{tcp_connect}
+                        || do { require AnyEvent::Socket; \&AnyEvent::Socket::tcp_connect };
+
+      $state{connect_guard} = $tcp_connect->($rhost, $rport, $connect_cb, $arg{on_prepare} || sub { $timeout });
+
    };
 
    defined wantarray && AnyEvent::Util::guard { %state = () }
@@ -789,6 +814,16 @@ otherwise.
 
 To clear an already-set proxy, use C<undef>.
 
+=item $date = AnyEvent::HTTP::format_date $timestamp
+
+Takes a POSIX timestamp (seconds since the epoch) and formats it as a HTTP
+Date (RFC 2616).
+
+=item $timestamp = AnyEvent::HTTP::parse_date $date
+
+Takes a HTTP Date (RFC 2616) and returns the corresponding POSIX
+timestamp, or C<undef> if the date cannot be parsed.
+
 =item $AnyEvent::HTTP::MAX_RECURSE
 
 The default value for the C<recurse> request parameter (default: C<10>).
@@ -817,6 +852,49 @@ connections. This number of can be useful for load-leveling.
 
 =cut
 
+our @month   = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+our @weekday = qw(Sun Mon Tue Wed Thu Fri Sat);
+
+sub format_date($) {
+   my ($time) = @_;
+
+   # RFC 822/1123 format
+   my ($S, $M, $H, $mday, $mon, $year, $wday, $yday, undef) = gmtime $time;
+
+   sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT",
+      $weekday[$wday], $mday, $month[$mon], $year + 1900,
+      $H, $M, $S;
+}
+
+sub parse_date($) {
+   my ($date) = @_;
+
+   my ($d, $m, $y, $H, $M, $S);
+
+   if ($date =~ /^[A-Z][a-z][a-z], ([0-9][0-9]) ([A-Z][a-z][a-z]) ([0-9][0-9][0-9][0-9]) ([0-9][0-9]):([0-9][0-9]):([0-9][0-9]) GMT$/) {
+      # RFC 822/1123, required by RFC 2616
+      ($d, $m, $y, $H, $M, $S) = ($1, $2, $3, $4, $5, $6);
+
+   } elsif ($date =~ /^[A-Z][a-z]+, ([0-9][0-9])-([A-Z][a-z][a-z])-([0-9][0-9]) ([0-9][0-9]):([0-9][0-9]):([0-9][0-9]) GMT$/) {
+      # RFC 850
+      ($d, $m, $y, $H, $M, $S) = ($1, $2, $3 < 69 ? $3 + 2000 : $3 + 1900, $4, $5, $6);
+
+   } elsif ($date =~ /^[A-Z][a-z][a-z] ([A-Z][a-z][a-z]) ([0-9 ][0-9]) ([0-9][0-9]):([0-9][0-9]):([0-9][0-9]) ([0-9][0-9][0-9][0-9])$/) {
+      # ISO C's asctime
+      ($d, $m, $y, $H, $M, $S) = ($2, $1, $6, $3, $4, $5);
+   }
+   # other formats fail in the loop below
+
+   for (0..11) {
+      if ($m eq $month[$_]) {
+         require Time::Local;
+         return Time::Local::timegm ($S, $M, $H, $d, $_, $y);
+      }
+   }
+
+   undef
+}
+
 sub set_proxy($) {
    if (length $_[0]) {
       $_[0] =~ m%^(https?):// ([^:/]+) (?: : (\d*) )?%ix
@@ -831,6 +909,62 @@ sub set_proxy($) {
 eval {
    set_proxy $ENV{http_proxy};
 };
+
+=head2 SOCKS PROXIES
+
+Socks proxies are not directly supported by AnyEvent::HTTP. You can
+compile your perl to support socks, or use an external program such as
+F<socksify> (dante) or F<tsocks> to make your program use a socks proxy
+transparently.
+
+Alternatively, for AnyEvent::HTTP only, you can use your own
+C<tcp_connect> function that does the proxy handshake - here is an example
+that works with socks4a proxies:
+
+   use Errno;
+   use AnyEvent::Util;
+   use AnyEvent::Socket;
+   use AnyEvent::Handle;
+
+   # host, port and username of/for your socks4a proxy
+   my $socks_host = "10.0.0.23";
+   my $socks_port = 9050;
+   my $socks_user = "";
+
+   sub socks4a_connect {
+      my ($host, $port, $connect_cb, $prepare_cb) = @_;
+
+      my $hdl = new AnyEvent::Handle
+         connect    => [$socks_host, $socks_port],
+         on_prepare => sub { $prepare_cb->($_[0]{fh}) },
+         on_error   => sub { $connect_cb->() },
+      ;
+
+      $hdl->push_write (pack "CCnNZ*Z*", 4, 1, $port, 1, $socks_user, $host);
+
+      $hdl->push_read (chunk => 8, sub {
+         my ($hdl, $chunk) = @_;
+         my ($status, $port, $ipn) = unpack "xCna4", $chunk;
+
+         if ($status == 0x5a) {
+            $connect_cb->($hdl->{fh}, (format_address $ipn) . ":$port");
+         } else {
+            $! = Errno::ENXIO; $connect_cb->();
+         }
+      });
+
+      $hdl
+   }
+
+Use C<socks4a_connect> instead of C<tcp_connect> when doing C<http_request>s,
+possibly after switching off other proxy types:
+
+   AnyEvent::HTTP::set_proxy undef; # usually you do not want other proxies
+
+   http_get 'http://www.google.com', tcp_connect => \&socks4a_connect, sub {
+      my ($data, $headers) = @_;
+      ...
+   };
 
 =head1 SEE ALSO
 
