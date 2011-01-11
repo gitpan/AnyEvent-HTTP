@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               AnyEvent-HTTP
-version:            2.0
+version:            2.01
 abstract:           ~
 author:  []
 license:            unknown
@@ -10,7 +10,8 @@ configure_requires:
 build_requires:
     ExtUtils::MakeMaker:  0
 requires:
-    AnyEvent:  5
+    AnyEvent:       5
+    common::sense:  3.3
 no_index:
     directory:
         - t
