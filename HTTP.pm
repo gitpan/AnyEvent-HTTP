@@ -17,7 +17,7 @@ run a supported event loop.
 
 This module implements a simple, stateless and non-blocking HTTP
 client. It supports GET, POST and other request methods, cookies and more,
-all on a very low level. It can follow redirects supports proxies and
+all on a very low level. It can follow redirects, supports proxies, and
 automatically limits the number of connections to the values specified in
 the RFC.
 
@@ -48,7 +48,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '2.01';
+our $VERSION = '2.02';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -548,7 +548,7 @@ sub cookie_jar_set_cookie($$$$) {
             $value =~ s/\\(.)/$1/gs;
          }
 
-         push @kv, lc $name, $value;
+         push @kv, @kv ? lc $name : $name, $value;
 
          last unless /\G\s*;/gc;
       }
