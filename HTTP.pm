@@ -48,7 +48,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '2.02';
+our $VERSION = '2.03';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -1334,7 +1334,7 @@ snippets.
 
 =head2 HTTP/1.1 FILE DOWNLOAD
 
-Downloading files with HTTP cna be quite tricky, especially when something
+Downloading files with HTTP can be quite tricky, especially when something
 goes wrong and you want tor esume.
 
 Here is a function that initiates and resumes a download. It uses the
