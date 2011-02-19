@@ -48,7 +48,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '2.03';
+our $VERSION = '2.04';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -181,10 +181,13 @@ Default timeout is 5 minutes.
 
 =item proxy => [$host, $port[, $scheme]] or undef
 
-Use the given http proxy for all requests. If not specified, then the
-default proxy (as specified by C<$ENV{http_proxy}>) is used.
+Use the given http proxy for all requests, or no proxy if C<undef> is
+used.
 
 C<$scheme> must be either missing or must be C<http> for HTTP.
+
+If not specified, then the default proxy is used (see
+C<AnyEvent::HTTP::set_proxy>).
 
 =item body => $string
 
@@ -531,7 +534,7 @@ sub cookie_jar_set_cookie($$$$) {
             \G\s*
             (?:
                expires \s*=\s* ([A-Z][a-z][a-z]+,\ [^,;]+)
-               | ([^=;,[:space:]]+) (?: \s*=\s* (?: "((?:[^\\"]+|\\.)*)" | ([^=;,[:space:]]*) ) )?
+               | ([^=;,[:space:]]+) (?: \s*=\s* (?: "((?:[^\\"]+|\\.)*)" | ([^;,[:space:]]*) ) )?
             )
          }gcxsi
       ) {
@@ -711,11 +714,11 @@ sub http_request($$@) {
    return $cb->(undef, { @pseudo, Status => 599, Reason => "Too many redirections" })
       if $recurse < 0;
 
-   my $proxy   = $arg{proxy}   || $PROXY;
+   my $proxy   = exists $arg{proxy} ? $arg{proxy} : $PROXY;
    my $timeout = $arg{timeout} || $TIMEOUT;
 
    my ($uscheme, $uauthority, $upath, $query, undef) = # ignore fragment
-      $url =~ m|(?:([^:/?#]+):)?(?://([^/?#]*))?([^?#]*)(?:(\?[^#]*))?(?:#(.*))?|;
+      $url =~ m|^([^:]+):(?://([^/?#]*))?([^?#]*)(?:(\?[^#]*))?(?:#(.*))?$|;
 
    $uscheme = lc $uscheme;
 
@@ -1174,6 +1177,10 @@ string of the form C<http://host:port>, croaks otherwise.
 
 To clear an already-set proxy, use C<undef>.
 
+When AnyEvent::HTTP is laoded for the first time it will query the
+default proxy from the operating system, currently by looking at
+C<$ENV{http_proxy>}.
+
 =item AnyEvent::HTTP::cookie_jar_expire $jar[, $session_end]
 
 Remove all cookies from the cookie jar that have been expired. If
@@ -1335,7 +1342,7 @@ snippets.
 =head2 HTTP/1.1 FILE DOWNLOAD
 
 Downloading files with HTTP can be quite tricky, especially when something
-goes wrong and you want tor esume.
+goes wrong and you want to resume.
 
 Here is a function that initiates and resumes a download. It uses the
 last modified time to check for file content changes, and works with many
