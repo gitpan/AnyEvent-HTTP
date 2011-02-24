@@ -11,7 +11,7 @@
    },
    "generated_by" : "ExtUtils::MakeMaker::JSONMETA version 7.000",
    "distribution_type" : "module",
-   "version" : "2.04",
+   "version" : "2.1",
    "name" : "AnyEvent-HTTP",
    "author" : [],
    "license" : "unknown",
