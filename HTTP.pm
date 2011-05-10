@@ -48,7 +48,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '2.1';
+our $VERSION = '2.11';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -170,6 +170,9 @@ they won't be sent at all).
 You really should provide your own C<User-Agent:> header value that is
 appropriate for your program - I wouldn't be surprised if the default
 AnyEvent string gets blocked by webservers sooner or later.
+
+Also, make sure that your headers names and values do not contain any
+embedded newlines.
 
 =item timeout => $seconds
 
@@ -780,7 +783,7 @@ sub http_request($$@) {
    my $was_persistent; # true if this is actually a recycled connection
 
    # the key to use in the keepalive cache
-   my $ka_key = "$uhost\x00$arg{sessionid}";
+   my $ka_key = "$uscheme\x00$uhost\x00$uport\x00$arg{sessionid}";
 
    $hdr{connection} = ($persistent ? $keepalive ? "keep-alive " : "" : "close ") . "Te"; #1.1
    $hdr{te}         = "trailers" unless exists $hdr{te}; #1.1
