@@ -48,7 +48,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '2.13';
+our $VERSION = '2.14';
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -1255,7 +1255,7 @@ The default value for the C<recurse> request parameter (default: C<10>).
 
 =item $AnyEvent::HTTP::TIMEOUT
 
-The default timeout for conenction operations (default: C<300>).
+The default timeout for connection operations (default: C<300>).
 
 =item $AnyEvent::HTTP::USERAGENT
 
@@ -1330,7 +1330,7 @@ sub parse_date($) {
    for (0..11) {
       if ($m eq $month[$_]) {
          require Time::Local;
-         return Time::Local::timegm ($S, $M, $H, $d, $_, $y);
+         return eval { Time::Local::timegm ($S, $M, $H, $d, $_, $y) };
       }
    }
 
