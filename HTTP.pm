@@ -48,7 +48,7 @@ use AnyEvent::Handle ();
 
 use base Exporter::;
 
-our $VERSION = '2.15';
+our $VERSION = 2.2;
 
 our @EXPORT = qw(http_get http_post http_head http_request);
 
@@ -91,7 +91,7 @@ object at least alive until the callback get called. If the object gets
 destroyed before the callback is called, the request will be cancelled.
 
 The callback will be called with the response body data as first argument
-(or C<undef> if an error occured), and a hash-ref with response headers
+(or C<undef> if an error occurred), and a hash-ref with response headers
 (and trailers) as second argument.
 
 All the headers in that hash are lowercased. In addition to the response
@@ -125,7 +125,7 @@ message. Currently the following status codes are used:
 
 =over 4
 
-=item 595 - errors during connection etsbalishment, proxy handshake.
+=item 595 - errors during connection establishment, proxy handshake.
 
 =item 596 - errors during TLS negotiation, request sending and header processing.
 
@@ -158,6 +158,11 @@ include:
 
 Whether to recurse requests or not, e.g. on redirects, authentication and
 other retries and so on, and how often to do so.
+
+Only redirects to http and https URLs are supported. While most common
+redirection forms are handled entirely within this module, some require
+the use of the optional L<URI> module. If it is required but missing, then
+the request will fail with an error.
 
 =item headers => hashref
 
@@ -244,7 +249,7 @@ context) - only connections using the same unique ID will be reused.
 =item on_prepare => $callback->($fh)
 
 In rare cases you need to "tune" the socket before it is used to
-connect (for exmaple, to bind it on a given IP address). This parameter
+connect (for example, to bind it on a given IP address). This parameter
 overrides the prepare callback passed to C<AnyEvent::Socket::tcp_connect>
 and behaves exactly the same way (e.g. it has to provide a
 timeout). See the description for the C<$prepare_cb> argument of
@@ -691,6 +696,44 @@ sub _error(\%$$) {
    ()
 }
 
+our %IDEMPOTENT = (
+   DELETE		=> 1,
+   GET			=> 1,
+   HEAD			=> 1,
+   OPTIONS		=> 1,
+   PUT			=> 1,
+   TRACE		=> 1,
+
+   ACL			=> 1,
+   "BASELINE-CONTROL"	=> 1,
+   BIND			=> 1,
+   CHECKIN		=> 1,
+   CHECKOUT		=> 1,
+   COPY			=> 1,
+   LABEL		=> 1,
+   LINK			=> 1,
+   MERGE		=> 1,
+   MKACTIVITY		=> 1,
+   MKCALENDAR		=> 1,
+   MKCOL		=> 1,
+   MKREDIRECTREF	=> 1,
+   MKWORKSPACE		=> 1,
+   MOVE			=> 1,
+   ORDERPATCH		=> 1,
+   PROPFIND		=> 1,
+   PROPPATCH		=> 1,
+   REBIND		=> 1,
+   REPORT		=> 1,
+   SEARCH		=> 1,
+   UNBIND		=> 1,
+   UNCHECKOUT		=> 1,
+   UNLINK		=> 1,
+   UNLOCK		=> 1,
+   UPDATE		=> 1,
+   UPDATEREDIRECTREF	=> 1,
+   "VERSION-CONTROL"	=> 1,
+);
+
 sub http_request($$@) {
    my $cb = pop;
    my ($method, $url, %arg) = @_;
@@ -775,7 +818,7 @@ sub http_request($$@) {
    $hdr{"content-length"} = length $arg{body}
       if length $arg{body} || $method ne "GET";
 
-   my $idempotent = $method =~ /^(?:GET|HEAD|PUT|DELETE|OPTIONS|TRACE)$/;
+   my $idempotent = $IDEMPOTENT{$method};
 
    # default value for keepalive is true iff the request is for an idempotent method
    my $persistent = exists $arg{persistent} ? !!$arg{persistent} : $idempotent;
@@ -785,7 +828,7 @@ sub http_request($$@) {
    # the key to use in the keepalive cache
    my $ka_key = "$uscheme\x00$uhost\x00$uport\x00$arg{sessionid}";
 
-   $hdr{connection} = ($persistent ? $keepalive ? "keep-alive " : "" : "close ") . "Te"; #1.1
+   $hdr{connection} = ($persistent ? $keepalive ? "keep-alive, " : "" : "close, ") . "Te"; #1.1
    $hdr{te}         = "trailers" unless exists $hdr{te}; #1.1
 
    my %state = (connect_guard => 1);
@@ -808,7 +851,7 @@ sub http_request($$@) {
          . (delete $arg{body})
       );
 
-      # return if error occured during push_write()
+      # return if error occurred during push_write()
       return unless %state;
 
       # reduce memory usage, save a kitten, also re-use it for the response headers.
@@ -845,19 +888,42 @@ sub http_request($$@) {
          }
 
          # redirect handling
-         # microsoft and other shitheads don't give a shit for following standards,
-         # try to support some common forms of broken Location headers.
-         if ($hdr{location} !~ /^(?: $ | [^:\/?\#]+ : )/x) {
-            $hdr{location} =~ s/^\.\/+//;
+         # relative uri handling forced by microsoft and other shitheads.
+         # we give our best and fall back to URI if available.
+         if (exists $hdr{location}) {
+            my $loc = $hdr{location};
 
-            my $url = "$rscheme://$uhost:$uport";
+            if ($loc =~ m%^//%) { # //
+               $loc = "$rscheme:$loc";
 
-            unless ($hdr{location} =~ s/^\///) {
-               $url .= $upath;
-               $url =~ s/\/[^\/]*$//;
+            } elsif ($loc eq "") {
+               $loc = $url;
+
+            } elsif ($loc !~ /^(?: $ | [^:\/?\#]+ : )/x) { # anything "simple"
+               $loc =~ s/^\.\/+//;
+
+               if ($loc !~ m%^[.?#]%) {
+                  my $prefix = "$rscheme://$uhost:$uport";
+
+                  unless ($loc =~ s/^\///) {
+                     $prefix .= $upath;
+                     $prefix =~ s/\/[^\/]*$//;
+                  }
+
+                  $loc = "$prefix/$loc";
+
+               } elsif (eval { require URI }) { # uri
+                  $loc = URI->new_abs ($loc, $url)->as_string;
+
+               } else {
+                  return _error %state, $cb, { @pseudo, Status => 599, Reason => "Cannot parse Location (URI module missing)" };
+                  #$hdr{Status} = 599;
+                  #$hdr{Reason} = "Unparsable Redirect (URI module missing)";
+                  #$recurse = 0;
+               }
             }
 
-            $hdr{location} = "$url/$hdr{location}";
+            $hdr{location} = $loc;
          }
 
          my $redirect;
@@ -869,12 +935,13 @@ sub http_request($$@) {
             # 301, 302 and 303, in contrast to HTTP/1.0 and 1.1.
             # also, the UA should ask the user for 301 and 307 and POST,
             # industry standard seems to be to simply follow.
-            # we go with the industry standard.
+            # we go with the industry standard. 308 is defined
+            # by rfc7238
             if ($status == 301 or $status == 302 or $status == 303) {
                # HTTP/1.1 is unclear on how to mutate the method
                $method = "GET" unless $method eq "HEAD";
                $redirect = 1;
-            } elsif ($status == 307) {
+            } elsif ($status == 307 or $status == 308) {
                $redirect = 1;
             }
          }
@@ -1196,7 +1263,7 @@ string of the form C<http://host:port>, croaks otherwise.
 
 To clear an already-set proxy, use C<undef>.
 
-When AnyEvent::HTTP is laoded for the first time it will query the
+When AnyEvent::HTTP is loaded for the first time it will query the
 default proxy from the operating system, currently by looking at
 C<$ENV{http_proxy>}.
 
@@ -1208,7 +1275,7 @@ cookies.
 
 You should call this function (with a true C<$session_end>) before you
 save cookies to disk, and you should call this function after loading them
-again. If you have a long-running program you can additonally call this
+again. If you have a long-running program you can additionally call this
 function from time to time.
 
 A cookie jar is initially an empty hash-reference that is managed by this
@@ -1218,11 +1285,12 @@ The key C<version> has to contain C<1>, otherwise the hash gets
 emptied. All other keys are hostnames or IP addresses pointing to
 hash-references. The key for these inner hash references is the
 server path for which this cookie is meant, and the values are again
-hash-references. The keys of those hash-references is the cookie name, and
+hash-references. Each key of those hash-references is a cookie name, and
 the value, you guessed it, is another hash-reference, this time with the
 key-value pairs from the cookie, except for C<expires> and C<max-age>,
 which have been replaced by a C<_expires> key that contains the cookie
-expiry timestamp.
+expiry timestamp. Session cookies are indicated by not having an
+C<_expires> key.
 
 Here is an example of a cookie jar with a single cookie, so you have a
 chance of understanding the above paragraph:
@@ -1274,13 +1342,13 @@ The default value for this is C<4>, and it is highly advisable to not
 increase it much.
 
 For comparison: the RFC's recommend 4 non-persistent or 2 persistent
-connections, older browsers used 2, newers (such as firefox 3) typically
-use 6, and Opera uses 8 because like, they have the fastest browser and
-give a shit for everybody else on the planet.
+connections, older browsers used 2, newer ones (such as firefox 3)
+typically use 6, and Opera uses 8 because like, they have the fastest
+browser and give a shit for everybody else on the planet.
 
 =item $AnyEvent::HTTP::PERSISTENT_TIMEOUT
 
-The time after which idle persistent conenctions get closed by
+The time after which idle persistent connections get closed by
 AnyEvent::HTTP (default: C<3>).
 
 =item $AnyEvent::HTTP::ACTIVE
@@ -1355,7 +1423,7 @@ eval {
 
 =head2 SHOWCASE
 
-This section contaisn some more elaborate "real-world" examples or code
+This section contains some more elaborate "real-world" examples or code
 snippets.
 
 =head2 HTTP/1.1 FILE DOWNLOAD
@@ -1369,7 +1437,7 @@ HTTP/1.0 servers as well, and usually falls back to a complete re-download
 on older servers.
 
 It calls the completion callback with either C<undef>, which means a
-nonretryable error occured, C<0> when the download was partial and should
+nonretryable error occurred, C<0> when the download was partial and should
 be retried, and C<1> if it was successful.
 
    use AnyEvent::HTTP;
