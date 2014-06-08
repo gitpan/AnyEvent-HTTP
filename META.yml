@@ -22,4 +22,4 @@ recommends:
 requires:
   AnyEvent: '5.33'
   common::sense: '3.3'
-version: 2.2
+version: 2.21
